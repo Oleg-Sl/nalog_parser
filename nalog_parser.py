@@ -9,31 +9,95 @@ from typing import List, Tuple, Optional
 from captcha_solver.solver import solve_captcha
 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(filename='nalog_parser.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class NalogClient:
     BASE_URL = "https://service.nalog.ru"
 
     def __init__(self):
+        self.session = None
+        self.is_initialized = False
+        self.captcha_token = None
+        self.request_count = 0
+        self.max_requests_per_session = 50 
+        
+        self._reset_session()
+
+    def _reset_session(self):
+        logging.info("Пересоздание сессии (rotate session)...")
+        if self.session:
+            self.session.close()
+        
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "X-Requested-With": "XMLHttpRequest"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36...",
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
         })
         self.is_initialized = False
-
         self.captcha_token = None
+        self.request_count = 0
 
     def _ensure_session(self):
+        if self.request_count >= self.max_requests_per_session:
+            self._reset_session()
+
         if not self.is_initialized:
-            logging.info("Открытие стартовой страницы для инициализации сессии...")
             try:
                 self.session.get(f"{self.BASE_URL}/bi.do", timeout=10)
                 self.is_initialized = True
             except Exception as e:
                 logging.error(f"Ошибка инициализации: {e}")
 
+    def get_data(self, inn: str, bik: str, timeout: int = 20) -> dict:
+        self._ensure_session()
+        self.request_count += 1        
+        
+        result = {"status": "error", "message": "Неизвестная ошибка", "data": None}
+
+        payload = {
+            'requestType': 'FINDPRS',
+            'innPRS': inn,
+            'bikPRS': bik,
+            'captchaToken': self.captcha_token or ''
+        }
+
+        try:
+            response = self.session.post(
+                f"{self.BASE_URL}/bi2-proc.json", 
+                data=payload, 
+                timeout=(5, timeout) 
+            )
+
+            if response.status_code in [403, 500, 503]:
+                self.is_initialized = False 
+                self._reset_session() 
+                return {"status": "server_error", "code": response.status_code, "message": "Сервер отклонил сессию"}
+
+            if response.status_code == 200:
+                return {"status": "success", "message": "OK", "data": response.json()}
+
+            data = response.json()
+            if response.status_code == 400:
+                errors = data.get('ERRORS', {})
+                if 'captcha' in errors:
+                    new_token = self._try_solve_captcha()
+                    if new_token:
+                        self.captcha_token = new_token
+                        return self.get_data(inn, bik, timeout)
+                    return {"status": "captcha_failed", "message": "Не удалось разгадать капчу", "data": data}
+
+                return {"status": "validation_error", "message": str(errors), "data": data}
+
+        except requests.exceptions.Timeout:
+            self._reset_session() 
+            return {"status": "timeout", "message": f"Превышено время ожидания ({timeout}с)", "data": None}
+        except Exception as e:
+            return {"status": "error", "message": str(e), "data": None}
+
+        return result
+    
     def _try_solve_captcha(self, max_attempts: int = 10) -> Optional[str]:
         for attempt in range(1, max_attempts + 1):
             logging.info(f"Попытка разгадать капчу №{attempt}...")
@@ -56,8 +120,6 @@ class NalogClient:
                             f.write(chunk)
 
                 captcha_text = solve_captcha(captcha_name)
-                print('captcha_text = ', captcha_text)
-                # captcha_text = input('Введите решение капчи: ')
 
                 if not captcha_text:
                     logging.warning(f"Сервис не распознал капчу на попытке {attempt}. Пауза...")
@@ -82,39 +144,6 @@ class NalogClient:
 
         logging.error("Не удалось решить капчу после всех попыток.")
         return None
-
-    # {"ERROR":"-","ERRORS":{"captcha":["Требуется ввести цифры с картинки (123, .45)"]},"STATUS":400}
-    # {"ERROR":"-","ERRORS":{"innPRS":["Некорректный ИНН ЮЛ"]},"STATUS":400}
-    def get_data(self, inn: str, bik: str) -> Optional[dict]:
-        self._ensure_session()
-
-        print('self.captcha_token = ', self.captcha_token)
-        payload = {
-            'requestType': 'FINDPRS',
-            'innPRS': inn,
-            'bikPRS': bik,
-            'captchaToken': self.captcha_token or ''
-        }
-
-        try:
-            response = self.session.post(f"{self.BASE_URL}/bi2-proc.json", data=payload, timeout=15)
-            data = response.json()
-            if response.status_code == 400 and 'ERRORS' in data and 'captcha' in data['ERRORS']:
-                logging.warning(f"Требуется капча для ИНН {inn}...")
-                new_token = self._try_solve_captcha()
-                self.captcha_token = new_token
-                if new_token:
-                    return self.get_data(inn, bik)
-                return None
-            elif response.status_code == 400:
-                logging.warning(f"Требуется капча для ИНН {inn}...")
-                return data
-
-            return data
-        
-        except Exception as e:
-            logging.error(f"Ошибка запроса для {inn}: {e}")
-            return None
 
 
 def main_loop(items: List[Tuple[str, str]]):

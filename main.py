@@ -6,7 +6,6 @@ from inn_service import InnService
 
 def main():
     INPUT_FILE = "input_data.csv"
-    OUTPUT_RESULT_FILE = "output_results.xlsx"
     OUTPUT_DATA_FILE = "output_data.xlsx"
     
     REQUIRED_COLUMNS = ['inn', 'bik']
@@ -20,15 +19,9 @@ def main():
             return
         
         client = NalogClient()
-        service = InnService(client, OUTPUT_RESULT_FILE, OUTPUT_DATA_FILE)
-        result_df = service.process(df)
+        service = InnService(client, INPUT_FILE, OUTPUT_DATA_FILE)
+        service.process()
 
-        success_count = result_df[result_df['response_status'] == 'success'].shape[0]
-        error_count = result_df[result_df['response_status'] == 'error'].shape[0]
-
-        print(f"Обработка завершена!")
-        print(f"Успешно: {success_count}")
-        print(f"С ошибками: {error_count}")
     except Exception as e:
         print(f"Ошибка в процессе обработки: {e}")
         raise
